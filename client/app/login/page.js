@@ -1,7 +1,10 @@
 'use client';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import {
+  signInWithEmailAndPassword,
+  getIdTokenResult,
+} from 'firebase/auth';
 import { auth, db } from '../../lib/firebaseClient';
 import { doc, getDoc } from 'firebase/firestore';
 
@@ -37,6 +40,7 @@ export default function LoginPage() {
     setInfo(baseInfo);
 
     try {
+      // 1) Firebase auth sign-in
       const userCredential = await signInWithEmailAndPassword(
         auth,
         normalizedEmail,
@@ -44,26 +48,42 @@ export default function LoginPage() {
       );
       const user = userCredential.user;
 
+      // 2) Get custom claims from ID token
+      //    (sign-in usually gives fresh token but this is safe)
+      const tokenResult = await getIdTokenResult(user);
+      const claimsRole = tokenResult.claims.role || null;
+
+      // 3) Get Firestore user doc for role + extra data
       const userDocRef = doc(db, 'users', user.uid);
       const userDoc = await getDoc(userDocRef);
 
       if (!userDoc.exists()) {
         setError('User profile not found in Firestore.');
-        setInfo({ ...baseInfo, status: 'Profile missing' });
+        setInfo({ ...baseInfo, status: 'Profile missing in Firestore' });
         return;
       }
 
-      const userRole = userDoc.data().role;
-      console.log('Logged-in role:', userRole);
+      const firestoreRole = userDoc.data().role || null;
 
-      setInfo({ ...baseInfo, status: 'Login Successful! Redirecting…' });
+      // 4) Decide effective role: prefer claims, fallback to Firestore
+      const effectiveRole = claimsRole || firestoreRole || '';
 
-      // Redirect by role (Master/Executive -> /tasks)
-      if (userRole === 'Admin') {
+      console.log('[Login Debug] claimsRole =', claimsRole);
+      console.log('[Login Debug] firestoreRole =', firestoreRole);
+      console.log('[Login Debug] effectiveRole =', effectiveRole);
+
+      setInfo({
+        ...baseInfo,
+        role: effectiveRole || 'Unknown',
+        status: 'Login Successful! Redirecting…',
+      });
+
+      // 5) Redirect by effectiveRole
+      if (effectiveRole === 'Admin') {
         router.replace('/dashboard');
-      } else if (userRole === 'TeamAdmin') {
+      } else if (effectiveRole === 'TeamAdmin') {
         router.replace('/teamadmin');
-      } else if (userRole === 'Executive' || userRole === 'Master') {
+      } else if (effectiveRole === 'Executive' || effectiveRole === 'Master') {
         router.replace('/tasks');
       } else {
         router.replace('/unauthorized');
@@ -132,7 +152,9 @@ export default function LoginPage() {
         <div className="px-8 py-10 md:px-10 bg-white">
           <div className="mb-6">
             <h2 className="text-xl font-semibold text-slate-900">Sign in</h2>
-            <p className="text-sm text-slate-500 mt-1">Enter your credentials to continue.</p>
+            <p className="text-sm text-slate-500 mt-1">
+              Enter your credentials to continue.
+            </p>
           </div>
 
           <form onSubmit={handleLogin} className="space-y-5">
@@ -176,7 +198,7 @@ export default function LoginPage() {
               />
             </div>
 
-            {/* Role */}
+            {/* Role – informational only */}
             <div className="space-y-1">
               <label htmlFor="role" className="block text-sm font-medium text-slate-700">
                 Role (optional)
@@ -218,7 +240,9 @@ export default function LoginPage() {
             {info && (
               <div
                 className={`mt-3 text-[11px] border rounded-lg p-3 ${
-                  error ? 'border-red-200 bg-red-50 text-red-700' : 'border-sky-100 bg-sky-50 text-slate-700'
+                  error
+                    ? 'border-red-200 bg-red-50 text-red-700'
+                    : 'border-sky-100 bg-sky-50 text-slate-700'
                 }`}
               >
                 <p className="font-semibold mb-1">Status (Firebase Check):</p>
@@ -229,7 +253,13 @@ export default function LoginPage() {
                   <span className="font-semibold">Role:</span> {info.role}
                 </p>
                 {info.status && (
-                  <p className={`mt-1 font-medium ${error ? 'text-red-700' : 'text-emerald-700'}`}>{info.status}</p>
+                  <p
+                    className={`mt-1 font-medium ${
+                      error ? 'text-red-700' : 'text-emerald-700'
+                    }`}
+                  >
+                    {info.status}
+                  </p>
                 )}
               </div>
             )}

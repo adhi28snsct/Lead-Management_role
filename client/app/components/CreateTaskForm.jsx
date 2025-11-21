@@ -1,4 +1,4 @@
-// components/CreateTaskForm.jsx
+// app/components/CreateTaskForm.jsx
 'use client';
 
 import { useState } from 'react';
@@ -42,7 +42,7 @@ export default function CreateTaskForm({
       setGlobalError('Select a team first.');
       return;
     }
-    if (!title || !assignedTo || !deadline) {
+    if (!title.trim() || !assignedTo || !deadline) {
       setGlobalError('Please provide a title, assignee and a deadline.');
       return;
     }
@@ -53,8 +53,12 @@ export default function CreateTaskForm({
 
       const payload = {
         title: title.trim(),
-        assignedTo,                          // canonical camelCase
-        assignedToName: assignedMember?.name || '',
+        assignedTo, // uid
+        assignedToName:
+          assignedMember?.name ||
+          assignedMember?.email ||
+          assignedMember?.id ||
+          '',
         assignedBy: user.uid,
         assignedByName: user.displayName || user.email || user.uid,
         status: status || 'Pending',
@@ -69,18 +73,18 @@ export default function CreateTaskForm({
       const tasksRef = collection(db, 'teams', selectedTeamId, 'tasks');
       const docRef = await addDoc(tasksRef, payload);
 
-      // Send back a normalized object for UI immediate update.
       onCreated({
         id: docRef.id,
         ...payload,
-        // createdAt will be a server timestamp; UI can show placeholder
-        createdAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(), // local placeholder
       });
 
       resetForm();
     } catch (err) {
       console.error('Create Task Error:', err);
-      setGlobalError('Failed to create task. Check your permissions and Firestore rules.');
+      setGlobalError(
+        'Failed to create task. Check your permissions and Firestore rules.'
+      );
     } finally {
       setLoading(false);
     }
@@ -88,7 +92,9 @@ export default function CreateTaskForm({
 
   return (
     <div className="mt-6 pt-6 border-t border-slate-700">
-      <h3 className="text-lg font-bold text-orange-300 mb-3">Create New Task</h3>
+      <h3 className="text-lg font-bold text-orange-300 mb-3">
+        Create New Task
+      </h3>
 
       {!selectedTeamId ? (
         <p className="text-slate-400">Select a team first.</p>
@@ -106,6 +112,7 @@ export default function CreateTaskForm({
             required
           />
 
+          {/* Assign to member */}
           <select
             value={assignedTo}
             onChange={(e) => setAssignedTo(e.target.value)}
@@ -113,12 +120,17 @@ export default function CreateTaskForm({
             disabled={loading}
             required
           >
-            <option value="" disabled>Assign to Team Member</option>
-            {members.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name} ({m.role})
-              </option>
-            ))}
+            <option value="" disabled>
+              Assign to Team Member
+            </option>
+            {members.map((m) => {
+              const labelName = m.name || m.email || m.id;
+              return (
+                <option key={m.id} value={m.id}>
+                  {labelName} ({m.role})
+                </option>
+              );
+            })}
           </select>
 
           <input
