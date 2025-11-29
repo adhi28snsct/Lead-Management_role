@@ -11,9 +11,8 @@ import {
   getDocs,
   onSnapshot,
   setDoc,
-  query,
-  where,
   addDoc,
+  updateDoc,
 } from 'firebase/firestore';
 import { signOut } from 'firebase/auth';
 
@@ -40,26 +39,31 @@ export default function TeamAdminPage() {
   const [selectedTeamId, setSelectedTeamId] = useState('');
   const [selectedTeamName, setSelectedTeamName] = useState('');
 
-  const [members, setMembers] = useState([]);
+  const [members, setMembers] = useState([]); // team members
   const [leads, setLeads] = useState([]);
   const [tasks, setTasks] = useState([]);
+
+  // 🔥 All users from /users for dropdown
+  const [allUsers, setAllUsers] = useState([]); // [{uid, email, role}]
 
   const [loadingTeams, setLoadingTeams] = useState(true);
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [loadingLeads, setLoadingLeads] = useState(false);
   const [loadingTasks, setLoadingTasks] = useState(false);
+  const [loadingUsers, setLoadingUsers] = useState(false);
 
   const [error, setError] = useState('');
-  const [info, setInfo] = useState(''); // success/info messages
-  const [createdLeadInfo, setCreatedLeadInfo] = useState(null); // { id, teamId }
-  const [createdTaskInfo, setCreatedTaskInfo] = useState(null); // { id, teamId }
+  const [info, setInfo] = useState('');
+  const [createdLeadInfo, setCreatedLeadInfo] = useState(null);
+  const [createdTaskInfo, setCreatedTaskInfo] = useState(null);
 
   // Add Member form state
-  const [newMemberEmail, setNewMemberEmail] = useState('');
+  const [newMemberUid, setNewMemberUid] = useState('');
+  const [newMemberEmail, setNewMemberEmail] = useState(''); // we store email label
   const [newMemberRole, setNewMemberRole] = useState('Executive');
   const [addingMember, setAddingMember] = useState(false);
 
-  // Lead form states (if quick create inside this page — we also use separate Lead component)
+  // Lead form states
   const [leadName, setLeadName] = useState('');
   const [leadStatus, setLeadStatus] = useState('Pending');
   const [leadNotes, setLeadNotes] = useState('');
@@ -75,6 +79,7 @@ export default function TeamAdminPage() {
 
       try {
         setError('');
+        // allowed by rules: user can read their own /users/{uid}
         const userDoc = await getDoc(doc(db, 'users', u.uid));
         const role = userDoc.exists() ? userDoc.data().role : '';
 
@@ -93,6 +98,35 @@ export default function TeamAdminPage() {
     return () => unsub();
   }, [router]);
 
+  // ---------- Load ALL users for dropdown ----------
+  useEffect(() => {
+    if (!user || userRole !== 'TeamAdmin') return;
+
+    const loadUsers = async () => {
+      try {
+        setLoadingUsers(true);
+        setError('');
+        const snap = await getDocs(collection(db, 'users'));
+        const list = snap.docs.map((d) => {
+          const data = d.data() || {};
+          return {
+            uid: d.id,
+            email: data.email || '',
+            role: data.role || '',
+          };
+        });
+        setAllUsers(list);
+      } catch (e) {
+        console.error('Error loading users for dropdown:', e);
+        setError('Unable to load user list for member assignment.');
+      } finally {
+        setLoadingUsers(false);
+      }
+    };
+
+    loadUsers();
+  }, [user, userRole]);
+
   // ---------- Load teams where this user is TeamAdmin ----------
   useEffect(() => {
     if (!user || userRole !== 'TeamAdmin') return;
@@ -108,7 +142,9 @@ export default function TeamAdminPage() {
         const myTeams = [];
         for (const t of snapshot.docs) {
           try {
-            const memberDoc = await getDoc(doc(db, 'teams', t.id, 'members', user.uid));
+            const memberDoc = await getDoc(
+              doc(db, 'teams', t.id, 'members', user.uid)
+            );
             if (memberDoc.exists() && memberDoc.data().role === 'TeamAdmin') {
               myTeams.push({ id: t.id, ...(t.data() || {}) });
             }
@@ -126,14 +162,16 @@ export default function TeamAdminPage() {
         }
       } catch (e) {
         console.error('Error loading teams:', e);
-        setError('Unable to load teams. Ensure you are added as TeamAdmin in at least one team.');
+        setError(
+          'Unable to load teams. Ensure you are added as TeamAdmin in at least one team.'
+        );
       } finally {
         setLoadingTeams(false);
       }
     })();
   }, [user, userRole, selectedTeamId]);
 
-  // ---------- Load members for selected team (with user details) ----------
+  // ---------- Load members for selected team (resolve email using /users + fallback) ----------
   useEffect(() => {
     if (!user || !selectedTeamId) return;
 
@@ -145,45 +183,72 @@ export default function TeamAdminPage() {
     const unsub = onSnapshot(
       membersColRef,
       async (snapshot) => {
-        const memberUids = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        try {
+          const baseMembers = snapshot.docs.map((d) => {
+            const data = d.data() || {};
+            return {
+              id: d.id,
+              role: data.role || '',
+              name: data.name || '', // old stored label (email or name)
+            };
+          });
 
-        const membersWithDetails = await Promise.all(
-          memberUids.map(async (member) => {
-            try {
-              const userDoc = await getDoc(doc(db, 'users', member.id));
+          // Try to use allUsers first to resolve email quickly
+          const membersWithEmail = await Promise.all(
+            baseMembers.map(async (m) => {
+              // try from allUsers
+              const fromAll = allUsers.find((u) => u.uid === m.id);
+              if (fromAll && fromAll.email) {
+                return {
+                  ...m,
+                  email: fromAll.email,
+                };
+              }
+
+              // fallback: direct read from /users/{uid}
+              try {
+                const userSnap = await getDoc(doc(db, 'users', m.id));
+                if (userSnap.exists()) {
+                  const udata = userSnap.data() || {};
+                  return {
+                    ...m,
+                    email: udata.email || m.name || '',
+                  };
+                }
+              } catch (err) {
+                console.error('Error loading user email for member:', m.id, err);
+              }
 
               return {
-                id: member.id,
-                role: member.role,
-                email: userDoc.exists() ? userDoc.data().email : 'Email not found',
-                name: userDoc.exists() ? userDoc.data().name : member.id,
+                ...m,
+                email: m.name || '',
               };
-            } catch (e) {
-              console.error('Error fetching user detail for member:', member.id, e);
-              return {
-                id: member.id,
-                role: member.role,
-                email: 'Error fetching email',
-                name: `Error: ${member.id}`,
-              };
-            }
-          })
-        );
+            })
+          );
 
-        setMembers(membersWithDetails);
-        setLoadingMembers(false);
+          setMembers(membersWithEmail);
+          setLoadingMembers(false);
+        } catch (e) {
+          console.error('Error resolving member emails:', e);
+          setError(
+            'Unable to load team member details (email). Check your permissions or rules.'
+          );
+          setLoadingMembers(false);
+        }
       },
       (e) => {
         console.error('Error loading members:', e);
-        setError('Unable to load team members. Check your permissions or team selection.');
+        setError(
+          'Unable to load team members. Check your permissions or team selection.'
+        );
         setLoadingMembers(false);
       }
     );
 
     return () => unsub();
-  }, [user, selectedTeamId]);
+  }, [user, selectedTeamId, allUsers]);
 
-  // ---------- Load leads for selected team ----------
+  // ---------- Load leads ----------
   useEffect(() => {
     if (!user || !selectedTeamId) return;
 
@@ -200,7 +265,9 @@ export default function TeamAdminPage() {
       },
       (e) => {
         console.error('Error loading leads:', e);
-        setError('Unable to load team leads. Check your permissions or team selection.');
+        setError(
+          'Unable to load team leads. Check your permissions or team selection.'
+        );
         setLoadingLeads(false);
       }
     );
@@ -208,7 +275,7 @@ export default function TeamAdminPage() {
     return () => unsub();
   }, [user, selectedTeamId]);
 
-  // ---------- Load Tasks from team subcollection teams/{teamId}/tasks ----------
+  // ---------- Load tasks ----------
   useEffect(() => {
     if (!user || !selectedTeamId) {
       setTasks([]);
@@ -224,8 +291,6 @@ export default function TeamAdminPage() {
       tasksColRef,
       (snapshot) => {
         const list = snapshot.docs.map((d) => ({ id: d.id, ...(d.data() || {}) }));
-
-        // normalize: ensure assignedTo key exists even if older docs used 'assignedto'
         const normalized = list.map((t) => {
           if (!t.assignedTo && t.assignedto) t.assignedTo = t.assignedto;
           return t;
@@ -236,7 +301,9 @@ export default function TeamAdminPage() {
       },
       (e) => {
         console.error('Error loading tasks (team subcollection):', e);
-        setError('Unable to load tasks for this team. Check your permissions or team selection.');
+        setError(
+          'Unable to load tasks for this team. Check your permissions or team selection.'
+        );
         setLoadingTasks(false);
       }
     );
@@ -249,7 +316,6 @@ export default function TeamAdminPage() {
     setSelectedTeamId(teamId);
     const t = teams.find((x) => x.id === teamId);
     setSelectedTeamName(t?.name || t?.teamName || teamId);
-    // clear transient messages when switching
     setError('');
     setInfo('');
     setCreatedLeadInfo(null);
@@ -267,56 +333,46 @@ export default function TeamAdminPage() {
       });
   };
 
-  // Find UID from email (email should be stored lowercased in /users)
-  const findUserByEmail = async (email) => {
-    const usersRef = collection(db, 'users');
-    const q = query(usersRef, where('email', '==', email.toLowerCase()));
-    const snapshot = await getDocs(q);
-    if (snapshot.empty) return null;
-    return snapshot.docs[0].id;
-  };
-
+  // Add member using dropdown-selected user
   const handleAddMember = async (e) => {
     e?.preventDefault();
     setError('');
     setInfo('');
 
-    const emailToAdd = newMemberEmail.trim().toLowerCase();
+    const uid = newMemberUid.trim();
+    const emailText = newMemberEmail.trim(); // label shown in UI
 
-    if (!emailToAdd || !newMemberRole || !selectedTeamId) {
-      setError('Please enter member email, select a role, and ensure a team is selected.');
+    if (!uid || !newMemberRole || !selectedTeamId || !emailText) {
+      setError(
+        'Please select a user, choose a role, and ensure a team is selected.'
+      );
       return;
     }
 
     setAddingMember(true);
 
     try {
-      const memberUid = await findUserByEmail(emailToAdd);
-      if (!memberUid) {
-        setError(`User with email "${emailToAdd}" not found in the system.`);
-        setAddingMember(false);
-        return;
-      }
-
-      if (members.find((m) => m.id === memberUid)) {
+      if (members.find((m) => m.id === uid)) {
         setError('This user is already a member of the team.');
         setAddingMember(false);
         return;
       }
 
-      const memberRef = doc(db, 'teams', selectedTeamId, 'members', memberUid);
+      const memberRef = doc(db, 'teams', selectedTeamId, 'members', uid);
       await setDoc(memberRef, {
         role: newMemberRole,
         addedBy: user.uid,
         addedAt: new Date(),
+        name: emailText, // keep as fallback; real email also in /users
       });
 
+      setNewMemberUid('');
       setNewMemberEmail('');
       setNewMemberRole('Executive');
       setInfo('Member added successfully.');
     } catch (e) {
       console.error('Error adding member:', e);
-      setError('Unable to add member. Check if your Firestore rules and indexes allow the email lookup.');
+      setError('Unable to add member. Check your permissions.');
     } finally {
       setAddingMember(false);
     }
@@ -358,11 +414,9 @@ export default function TeamAdminPage() {
     }
   };
 
-  // Called by CreateTaskForm when it successfully creates a task
   const onTaskCreated = (newTask) => {
     setInfo('Task created successfully.');
     if (newTask?.id) setCreatedTaskInfo({ id: newTask.id, teamId: selectedTeamId });
-    // Add to local tasks state for immediate UI update (the snapshot will also pick it up)
     setTasks((prev) => {
       if (!newTask?.id) return prev;
       const exists = prev.some((p) => p.id === newTask.id);
@@ -380,19 +434,84 @@ export default function TeamAdminPage() {
     });
   };
 
-  // Helper to open the Firestore console (or in-app route) for created lead/task
+  // Assign lead to a member
+  const handleAssignLeadOwner = async (leadId, memberId) => {
+    if (!selectedTeamId) return;
+
+    setError('');
+    setInfo('');
+
+    const member = members.find((m) => m.id === memberId);
+
+    try {
+      const leadRef = doc(db, 'teams', selectedTeamId, 'leads', leadId);
+
+      if (!memberId) {
+        await updateDoc(leadRef, {
+          assignedTo: null,
+          assignedRole: null,
+          assignedToName: null,
+          lastModifiedBy: user?.uid || null,
+          lastModifiedAt: new Date(),
+        });
+
+        setLeads((prev) =>
+          prev.map((l) =>
+            l.id === leadId
+              ? { ...l, assignedTo: null, assignedRole: null, assignedToName: null }
+              : l
+          )
+        );
+        setInfo('Lead unassigned.');
+        return;
+      }
+
+      await updateDoc(leadRef, {
+        assignedTo: memberId,
+        assignedRole: member?.role || null,
+        assignedToName: member?.email || member?.name || null, // use email as display
+        lastModifiedBy: user?.uid || null,
+        lastModifiedAt: new Date(),
+      });
+
+      setLeads((prev) =>
+        prev.map((l) =>
+          l.id === leadId
+            ? {
+                ...l,
+                assignedTo: memberId,
+                assignedRole: member?.role || null,
+                assignedToName: member?.email || member?.name || null,
+              }
+            : l
+        )
+      );
+
+      setInfo('Lead assignment updated.');
+    } catch (e) {
+      console.error('Error assigning lead owner:', e);
+      setError('Unable to update lead assignment. Check your permissions.');
+    }
+  };
+
   const openConsolePath = (type, infoObj) => {
     if (!infoObj) return;
     const { teamId, id } = infoObj;
-    // This link is a helpful quick navigator string — you may change to in-app route if available
-    const path = type === 'lead'
-      ? `teams/${teamId}/leads/${id}`
-      : `teams/${teamId}/tasks/${id}`;
-    // open in new tab (user may want to inspect in firebase console or your own admin route)
-    const consoleUrl = `https://console.firebase.google.com/project/${process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'lead-management-role'}/firestore/data/~2Fteams~2F${teamId}~2F${type === 'lead' ? 'leads' : 'tasks'}~2F${id}`;
-    // try open firebase console; fallback to path print
+    const path =
+      type === 'lead'
+        ? `teams/${teamId}/leads/${id}`
+        : `teams/${teamId}/tasks/${id}`;
+    const consoleUrl = `https://console.firebase.google.com/project/${
+      process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || 'lead-management-role'
+    }/firestore/data/~2Fteams~2F${teamId}~2F${
+      type === 'lead' ? 'leads' : 'tasks'
+    }~2F${id}`;
     window.open(consoleUrl, '_blank') || alert(`Path: ${path}`);
   };
+
+  const assignableMembers = members.filter(
+    (m) => m.role === 'Executive' || m.role === 'Master'
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-950 to-sky-900 text-slate-50 p-6">
@@ -405,7 +524,10 @@ export default function TeamAdminPage() {
               <span>TeamAdmin Dashboard</span>
             </h1>
             <p className="text-sm text-slate-400 mt-1">
-              Managing team: <span className="font-semibold text-sky-300">{selectedTeamName || 'No Team Selected'}</span>
+              Managing team:{' '}
+              <span className="font-semibold text-sky-300">
+                {selectedTeamName || 'No Team Selected'}
+              </span>
             </p>
           </div>
 
@@ -422,7 +544,10 @@ export default function TeamAdminPage() {
         {/* Info/Error banners */}
         <div className="space-y-3">
           {error && (
-            <div role="alert" className="rounded-lg border border-red-500 bg-red-800/20 p-4 text-red-300 shadow-xl">
+            <div
+              role="alert"
+              className="rounded-lg border border-red-500 bg-red-800/20 p-4 text-red-300 shadow-xl"
+            >
               <div className="flex items-start gap-3">
                 <div className="text-xl">🚨</div>
                 <div>
@@ -434,7 +559,11 @@ export default function TeamAdminPage() {
           )}
 
           {info && (
-            <div role="status" aria-live="polite" className="rounded-lg border border-emerald-500 bg-emerald-900/10 p-4 text-emerald-200 shadow-md">
+            <div
+              role="status"
+              aria-live="polite"
+              className="rounded-lg border border-emerald-500 bg-emerald-900/10 p-4 text-emerald-200 shadow-md"
+            >
               <div className="flex items-start gap-3">
                 <div className="text-xl">✅</div>
                 <div>
@@ -477,7 +606,9 @@ export default function TeamAdminPage() {
                 <p className="text-slate-400">Loading teams…</p>
               </div>
             ) : teams.length === 0 ? (
-              <p className="text-slate-400 mt-3">No teams where you are TeamAdmin.</p>
+              <p className="text-slate-400 mt-3">
+                No teams where you are TeamAdmin.
+              </p>
             ) : (
               <div className="mt-3 space-y-3">
                 <select
@@ -518,16 +649,24 @@ export default function TeamAdminPage() {
               {loadingMembers ? (
                 <div className="flex items-center gap-3">
                   <Spinner size={2} />
-                  <p className="text-slate-400">Loading members details…</p>
+                  <p className="text-slate-400">Loading members…</p>
                 </div>
               ) : members.length > 0 ? (
                 <ul className="mt-3 space-y-3">
                   {members.map((m) => (
-                    <li key={m.id} className="rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2">
+                    <li
+                      key={m.id}
+                      className="rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2"
+                    >
                       <div className="flex items-start justify-between">
                         <div>
-                          <span className="text-sm font-semibold text-slate-100 block">{m.name || m.id}</span>
-                          <span className="text-xs text-slate-400">{m.email}</span>
+                          {/* Format 1: email then UID below */}
+                          <span className="text-sm font-semibold text-slate-100 block">
+                            {m.email || m.name || '(no email set)'}
+                          </span>
+                          <span className="text-[11px] text-slate-500 font-mono">
+                            UID: {m.id}
+                          </span>
                         </div>
                         <span className="text-[10px] font-bold rounded-full px-2 py-0.5 ml-4 flex-shrink-0 bg-sky-600/50 border border-sky-400 text-sky-100">
                           {m.role}
@@ -541,22 +680,66 @@ export default function TeamAdminPage() {
               )}
             </div>
 
-            {/* Add member Form */}
+            {/* Add member Form with user dropdown */}
             <div className="mt-6 pt-6 border-t border-slate-700">
-              <h3 className="text-lg font-bold text-sky-300 mb-3">Add New Member</h3>
+              <h3 className="text-lg font-bold text-sky-300 mb-3">
+                Add New Member
+              </h3>
               {!selectedTeamId ? (
-                <p className="text-slate-400">Select a team first to add members.</p>
+                <p className="text-slate-400">
+                  Select a team first to add members.
+                </p>
               ) : (
                 <form onSubmit={handleAddMember} className="space-y-3">
-                  <input
-                    type="email"
-                    placeholder="Member Email Address"
-                    value={newMemberEmail}
-                    onChange={(e) => setNewMemberEmail(e.target.value)}
-                    className="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-sky-500 shadow-inner"
-                    disabled={addingMember}
-                    required
-                  />
+                  {/* User dropdown by email */}
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-300">
+                      Select user by email
+                    </label>
+                    {loadingUsers ? (
+                      <div className="flex items-center gap-2 text-slate-400 text-xs">
+                        <Spinner size={1.5} />
+                        <span>Loading users…</span>
+                      </div>
+                    ) : (
+                      <select
+                        value={newMemberUid}
+                        onChange={(e) => {
+                          const uid = e.target.value;
+                          setNewMemberUid(uid);
+                          const selected = allUsers.find((u) => u.uid === uid);
+                          setNewMemberEmail(selected?.email || '');
+                        }}
+                        className="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-sky-500 shadow-inner"
+                        disabled={addingMember || allUsers.length === 0}
+                      >
+                        <option value="">
+                          {allUsers.length === 0
+                            ? 'No users found in system'
+                            : 'Choose a user…'}
+                        </option>
+                        {allUsers.map((u) => (
+                          <option key={u.uid} value={u.uid}>
+                            {u.email || '(no email)'}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+
+                  {/* Show selected email + UID preview */}
+                  {newMemberUid && newMemberEmail && (
+                    <div className="text-[11px] text-slate-300 border border-slate-700 bg-slate-900/60 rounded p-2">
+                      <div>
+                        <span className="font-semibold">Email:</span>{' '}
+                        {newMemberEmail}
+                      </div>
+                      <div className="font-mono">
+                        <span className="font-semibold">UID:</span> {newMemberUid}
+                      </div>
+                    </div>
+                  )}
+
                   <select
                     value={newMemberRole}
                     onChange={(e) => setNewMemberRole(e.target.value)}
@@ -574,11 +757,15 @@ export default function TeamAdminPage() {
                       disabled={addingMember}
                       className="flex-1 w-full rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-base font-semibold py-2.5 shadow-md focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50 transition"
                     >
-                      {addingMember ? 'Finding User & Adding…' : 'Add Member'}
+                      {addingMember ? 'Adding…' : 'Add Member'}
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setNewMemberEmail(''); setNewMemberRole('Executive'); }}
+                      onClick={() => {
+                        setNewMemberUid('');
+                        setNewMemberEmail('');
+                        setNewMemberRole('Executive');
+                      }}
                       className="rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 px-4 py-2.5"
                     >
                       Reset
@@ -595,9 +782,14 @@ export default function TeamAdminPage() {
               <h2 className="text-xl font-bold text-orange-400 mb-1 flex items-center gap-2">
                 <span className="text-2xl">✅</span>
                 <span>Task Assignment</span>
-                <span className="text-sm text-slate-400 font-normal">({tasks.length})</span>
+                <span className="text-sm text-slate-400 font-normal">
+                  ({tasks.length})
+                </span>
               </h2>
-              <div className="text-xs text-slate-400">Team: <span className="font-mono">{selectedTeamId || '—'}</span></div>
+              <div className="text-xs text-slate-400">
+                Team:{' '}
+                <span className="font-mono">{selectedTeamId || '—'}</span>
+              </div>
             </div>
 
             <div className="min-h-[150px] max-h-96 overflow-y-auto pr-2 mt-3">
@@ -611,10 +803,15 @@ export default function TeamAdminPage() {
               ) : (
                 <ul className="mt-3 space-y-3">
                   {tasks.map((t) => (
-                    <li key={t.id} className="rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2">
+                    <li
+                      key={t.id}
+                      className="rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2"
+                    >
                       <div className="flex justify-between items-start gap-3">
                         <div>
-                          <div className="text-sm font-medium text-slate-100 truncate">{t.title}</div>
+                          <div className="text-sm font-medium text-slate-100 truncate">
+                            {t.title}
+                          </div>
                           <div className="text-xs text-slate-400 mt-1">
                             To: {t.assignedToName || t.assignedTo || '—'}
                           </div>
@@ -623,7 +820,11 @@ export default function TeamAdminPage() {
                           <div className="text-[10px] font-bold rounded-full px-2 py-0.5 ml-4 inline-block bg-orange-600/40 border border-orange-400 text-orange-100">
                             {t.status}
                           </div>
-                          <div className="text-xs text-slate-500 mt-1">{t.deadline ? String(t.deadline).slice(0,10) : 'No due'}</div>
+                          <div className="text-xs text-slate-500 mt-1">
+                            {t.deadline
+                              ? String(t.deadline).slice(0, 10)
+                              : 'No due'}
+                          </div>
                         </div>
                       </div>
                     </li>
@@ -632,7 +833,6 @@ export default function TeamAdminPage() {
               )}
             </div>
 
-            {/* Create Task Component (extracted) */}
             <div className="mt-6 pt-6 border-t border-slate-700">
               <CreateTaskForm
                 user={user}
@@ -650,9 +850,14 @@ export default function TeamAdminPage() {
               <h2 className="text-xl font-bold text-emerald-400 mb-1 flex items-center gap-2">
                 <span className="text-2xl">🎯</span>
                 <span>Team Leads</span>
-                <span className="text-sm text-slate-400 font-normal">({leads.length})</span>
+                <span className="text-sm text-slate-400 font-normal">
+                  ({leads.length})
+                </span>
               </h2>
-              <div className="text-xs text-slate-400">Team: <span className="font-mono">{selectedTeamId || '—'}</span></div>
+              <div className="text-xs text-slate-400">
+                Team:{' '}
+                <span className="font-mono">{selectedTeamId || '—'}</span>
+              </div>
             </div>
 
             <div className="min-h-[150px] max-h-56 overflow-y-auto pr-2 mt-3">
@@ -665,31 +870,91 @@ export default function TeamAdminPage() {
                 <p className="text-slate-400">No leads yet.</p>
               ) : (
                 <ul className="mt-3 space-y-3">
-                  {leads.map((l) => (
-                    <li key={l.id} className="rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="text-sm font-medium text-slate-100 truncate">{l.name}</div>
-                          <div className="text-xs text-slate-400 mt-1 truncate">ID: {l.id}</div>
-                          {l.notes && <div className="text-xs text-slate-300 mt-1 italic truncate">Notes: {l.notes}</div>}
-                        </div>
-                        <div className="text-right">
-                          <div className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${l.status === 'Closed Won' || l.status === 'Complete' ? 'bg-green-600/50 border-green-400 text-green-100' : 'bg-orange-600/40 border-orange-400 text-orange-100'}`}>
-                            {l.status}
+                  {leads.map((l) => {
+                    const assignedMember = members.find(
+                      (m) => m.id === l.assignedTo
+                    );
+                    const assignedLabel =
+                      l.assignedToName ||
+                      assignedMember?.email ||
+                      assignedMember?.name ||
+                      'Unassigned';
+
+                    return (
+                      <li
+                        key={l.id}
+                        className="rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex-1">
+                            <div className="text-sm font-medium text-slate-100 truncate">
+                              {l.name}
+                            </div>
+                            <div className="text-xs text-slate-400 mt-1 truncate">
+                              ID: {l.id}
+                            </div>
+                            {l.notes && (
+                              <div className="text-xs text-slate-300 mt-1 italic truncate">
+                                Notes: {l.notes}
+                              </div>
+                            )}
+
+                            <div className="mt-2 text-xs text-slate-300">
+                              <span className="font-semibold">
+                                Assigned to:
+                              </span>{' '}
+                              {assignedLabel}
+                              {l.assignedRole && (
+                                <span className="ml-1 text-slate-400">
+                                  ({l.assignedRole})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="text-right w-40 flex flex-col items-end gap-2">
+                            <div
+                              className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${
+                                l.status === 'Closed Won' ||
+                                l.status === 'Complete'
+                                  ? 'bg-green-600/50 border-green-400 text-green-100'
+                                  : 'bg-orange-600/40 border-orange-400 text-orange-100'
+                              }`}
+                            >
+                              {l.status}
+                            </div>
+
+                            <select
+                              value={l.assignedTo || ''}
+                              onChange={(e) =>
+                                handleAssignLeadOwner(l.id, e.target.value)
+                              }
+                              className="w-full rounded-lg border border-slate-600 bg-slate-900 px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                            >
+                              <option value="">Unassigned</option>
+                              {assignableMembers.map((m) => (
+                                <option key={m.id} value={m.id}>
+                                  {m.email || m.name || m.id} ({m.role})
+                                </option>
+                              ))}
+                            </select>
                           </div>
                         </div>
-                      </div>
-                    </li>
-                  ))}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>
 
-            {/* Quick create lead form */}
             <div className="mt-6 pt-6 border-t border-slate-700">
-              <h3 className="text-lg font-bold text-emerald-300 mb-3">Create New Lead</h3>
+              <h3 className="text-lg font-bold text-emerald-300 mb-3">
+                Create New Lead
+              </h3>
               {!selectedTeamId ? (
-                <p className="text-slate-400">Select a team first to create leads.</p>
+                <p className="text-slate-400">
+                  Select a team first to create leads.
+                </p>
               ) : (
                 <form onSubmit={handleCreateLead} className="space-y-3">
                   <input
@@ -731,7 +996,11 @@ export default function TeamAdminPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setLeadName(''); setLeadStatus('Pending'); setLeadNotes(''); }}
+                      onClick={() => {
+                        setLeadName('');
+                        setLeadStatus('Pending');
+                        setLeadNotes('');
+                      }}
                       className="rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 px-4 py-2.5"
                     >
                       Reset
@@ -743,9 +1012,9 @@ export default function TeamAdminPage() {
           </div>
         </section>
 
-        {/* Footer */}
         <footer className="mt-10 text-[11px] text-slate-500 text-center border-t border-slate-800 pt-4">
-          &copy; {new Date().getFullYear()} Lead Management System. Powered by Next.js & Firebase.
+          &copy; {new Date().getFullYear()} Lead Management System. Powered by
+          Next.js & Firebase.
         </footer>
       </div>
     </div>

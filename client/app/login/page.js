@@ -1,9 +1,11 @@
 'use client';
+
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   signInWithEmailAndPassword,
   getIdTokenResult,
+  signOut,
 } from 'firebase/auth';
 import { auth, db } from '../../lib/firebaseClient';
 import { doc, getDoc } from 'firebase/firestore';
@@ -11,7 +13,7 @@ import { doc, getDoc } from 'firebase/firestore';
 export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState(''); // optional helper for user
+  const [role, setRole] = useState(''); // optional helper
   const [submitting, setSubmitting] = useState(false);
   const [info, setInfo] = useState(null);
   const [error, setError] = useState('');
@@ -48,12 +50,11 @@ export default function LoginPage() {
       );
       const user = userCredential.user;
 
-      // 2) Get custom claims from ID token
-      //    (sign-in usually gives fresh token but this is safe)
+      // 2) Get custom claims from ID token (if used)
       const tokenResult = await getIdTokenResult(user);
       const claimsRole = tokenResult.claims.role || null;
 
-      // 3) Get Firestore user doc for role + extra data
+      // 3) Get Firestore user doc
       const userDocRef = doc(db, 'users', user.uid);
       const userDoc = await getDoc(userDocRef);
 
@@ -63,10 +64,26 @@ export default function LoginPage() {
         return;
       }
 
-      const firestoreRole = userDoc.data().role || null;
+      const data = userDoc.data();
+      const firestoreRole = data.role || null;
+      const isActive = data.isActive;
 
-      // 4) Decide effective role: prefer claims, fallback to Firestore
-      const effectiveRole = claimsRole || firestoreRole || '';
+      // 3.5) Block deactivated users
+      if (isActive === false) {
+        setError('Your account has been deactivated by the admin.');
+        setInfo({
+          ...baseInfo,
+          role: firestoreRole || 'Unknown',
+          status: 'Account deactivated',
+        });
+
+        await signOut(auth);
+        return;
+      }
+
+      // 4) Decide effective role (lowercase for routing)
+      const rawRole = claimsRole || firestoreRole || '';
+      const effectiveRole = rawRole.toLowerCase();
 
       console.log('[Login Debug] claimsRole =', claimsRole);
       console.log('[Login Debug] firestoreRole =', firestoreRole);
@@ -74,16 +91,16 @@ export default function LoginPage() {
 
       setInfo({
         ...baseInfo,
-        role: effectiveRole || 'Unknown',
+        role: effectiveRole || 'unknown',
         status: 'Login Successful! Redirecting…',
       });
 
       // 5) Redirect by effectiveRole
-      if (effectiveRole === 'Admin') {
+      if (effectiveRole === 'admin') {
         router.replace('/dashboard');
-      } else if (effectiveRole === 'TeamAdmin') {
+      } else if (effectiveRole === 'teamadmin') {
         router.replace('/teamadmin');
-      } else if (effectiveRole === 'Executive' || effectiveRole === 'Master') {
+      } else if (effectiveRole === 'executive' || effectiveRole === 'master') {
         router.replace('/tasks');
       } else {
         router.replace('/unauthorized');
@@ -201,8 +218,7 @@ export default function LoginPage() {
             {/* Role – informational only */}
             <div className="space-y-1">
               <label htmlFor="role" className="block text-sm font-medium text-slate-700">
-                Role (optional)
-              </label>
+                Role (optional)</label>
               <select
                 id="role"
                 value={role}

@@ -8,6 +8,7 @@ import {
   getDocs,
   doc,
   getDoc,
+  updateDoc,        // for user activate/deactivate
 } from 'firebase/firestore';
 import {
   onAuthStateChanged,
@@ -56,7 +57,7 @@ const tabIcons = {
   tasks: <TaskIcon />,
 };
 
-// --- COMPONENT 1: TabButton ---
+// --- COMPONENT: TabButton ---
 const TabButton = ({ name, tabId, activeTab, setActiveTab }) => (
   <button
     onClick={() => setActiveTab(tabId)}
@@ -73,20 +74,21 @@ const TabButton = ({ name, tabId, activeTab, setActiveTab }) => (
   </button>
 );
 
-// --- COMPONENT 2: RoleAssignmentSelect ---
+// --- COMPONENT: RoleAssignmentSelect ---
 const RoleAssignmentSelect = ({ user, handleAssignRole, disabled = false }) => {
   const [isUpdating, setIsUpdating] = useState(false);
   const [tempRole, setTempRole] = useState('');
 
   const getRoleBadgeClass = (role) => {
-    switch (role) {
-      case 'Admin':
+    const r = (role || '').toLowerCase();
+    switch (r) {
+      case 'admin':
         return 'bg-red-600 text-white font-bold';
-      case 'TeamAdmin':
+      case 'teamadmin':
         return 'bg-emerald-600 text-white font-semibold';
-      case 'Master':
+      case 'master':
         return 'bg-violet-500 text-white font-semibold';
-      case 'Executive':
+      case 'executive':
         return 'bg-indigo-600 text-white';
       default:
         return 'bg-gray-200 text-gray-700';
@@ -117,7 +119,7 @@ const RoleAssignmentSelect = ({ user, handleAssignRole, disabled = false }) => {
           user.role,
         )}`}
       >
-        {user.role || 'NONE'}
+        {user.role ? user.role : 'NONE'}
       </span>
 
       <select
@@ -142,8 +144,14 @@ const RoleAssignmentSelect = ({ user, handleAssignRole, disabled = false }) => {
   );
 };
 
-// --- COMPONENT 3: UserManagementTab ---
-const UserManagementTab = ({ users, handleAssignRole, loading }) => {
+// --- COMPONENT: UserManagementTab (with Activate/Deactivate) ---
+const UserManagementTab = ({
+  users,
+  handleAssignRole,
+  handleToggleActive,
+  currentUserId,
+  loading,
+}) => {
   if (loading) {
     return (
       <div className="flex flex-col items-center justify-center p-10 bg-white rounded-xl shadow-lg">
@@ -164,8 +172,11 @@ const UserManagementTab = ({ users, handleAssignRole, loading }) => {
             <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
               Role
             </th>
+            <th className="px-6 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+              Status
+            </th>
             <th className="px-6 py-3 text-right text-xs font-semibold text-gray-600 uppercase tracking-wider">
-              UID
+              Action
             </th>
           </tr>
         </thead>
@@ -173,7 +184,7 @@ const UserManagementTab = ({ users, handleAssignRole, loading }) => {
           {users.length === 0 ? (
             <tr>
               <td
-                colSpan="3"
+                colSpan="4"
                 className="px-6 py-8 text-center text-gray-500 bg-gray-50"
               >
                 <span className="text-3xl block mb-2">🤷‍♂️</span>
@@ -197,8 +208,32 @@ const UserManagementTab = ({ users, handleAssignRole, loading }) => {
                     handleAssignRole={handleAssignRole}
                   />
                 </td>
+                <td className="px-6 py-4 whitespace-nowrap">
+                  {u.isActive ? (
+                    <span className="inline-flex items-center px-3 py-1 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">
+                      Active
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center px-3 py-1 rounded-full bg-red-100 text-red-700 text-xs font-semibold">
+                      Inactive
+                    </span>
+                  )}
+                </td>
                 <td className="px-6 py-4 whitespace-nowrap text-right text-xs text-gray-500 font-mono">
-                  {String(u.uid || '').substring(0, 10)}...
+                  {u.uid === currentUserId ? (
+                    <span className="text-[11px] text-gray-400">(You)</span>
+                  ) : (
+                    <button
+                      onClick={() => handleToggleActive(u.uid, u.isActive)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${
+                        u.isActive
+                          ? 'bg-red-500 text-white hover:bg-red-600'
+                          : 'bg-emerald-500 text-white hover:bg-emerald-600'
+                      }`}
+                    >
+                      {u.isActive ? 'Deactivate' : 'Activate'}
+                    </button>
+                  )}
                 </td>
               </tr>
             ))
@@ -209,6 +244,112 @@ const UserManagementTab = ({ users, handleAssignRole, loading }) => {
   );
 };
 
+// --- OPTIONAL: Task Placeholder ---
+const TaskFeaturePlaceholder = () => (
+  <div className="bg-white rounded-xl shadow p-6 text-sm text-gray-600">
+    Task management module can be implemented as a future enhancement.
+  </div>
+);
+
+// --- NEW: Dashboard Stats Components ---
+const StatCard = ({ label, value, subtitle, accent }) => (
+  <div className="relative overflow-hidden rounded-2xl bg-white shadow-sm border border-gray-100 px-4 py-4 flex flex-col">
+    {/* soft accent bar */}
+    <div
+      className="absolute inset-x-0 top-0 h-1"
+      style={{
+        background:
+          accent ||
+          'linear-gradient(to right, rgb(129, 140, 248), rgb(56, 189, 248))',
+      }}
+    />
+    <span className="mt-2 text-[11px] font-semibold text-gray-500 uppercase tracking-[0.18em]">
+      {label}
+    </span>
+    <span className="mt-1 text-2xl font-bold text-slate-900">
+      {value}
+    </span>
+    {subtitle && (
+      <span className="mt-1 text-xs text-slate-500">
+        {subtitle}
+      </span>
+    )}
+  </div>
+);
+
+const StatsOverview = ({ stats }) => {
+  const {
+    totalLeads = 0,
+    newCount = 0,
+    contactedCount = 0,
+    qualifiedCount = 0,
+    lostCount = 0,
+  } = stats || {};
+
+  const conversionRate =
+    totalLeads > 0 ? Math.round((qualifiedCount / totalLeads) * 100) : 0;
+
+  return (
+    <section className="mb-6">
+      <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-lg md:text-xl font-bold text-slate-900">
+            Pipeline Snapshot
+          </h2>
+          <p className="text-xs md:text-sm text-slate-500">
+            High-level view of your current lead flow across all teams.
+          </p>
+        </div>
+        <div className="text-[11px] text-slate-400 md:text-right">
+          <p>Updated from Firestore in real-time*</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+        <StatCard
+          label="Total Leads"
+          value={totalLeads}
+          subtitle="Across all teams"
+          accent="linear-gradient(to right, rgb(129, 140, 248), rgb(56, 189, 248))"
+        />
+        <StatCard
+          label="New"
+          value={newCount}
+          subtitle="Freshly created"
+          accent="linear-gradient(to right, rgb(59, 130, 246), rgb(147, 197, 253))"
+        />
+        <StatCard
+          label="Contacted"
+          value={contactedCount}
+          subtitle="Initial touch done"
+          accent="linear-gradient(to right, rgb(250, 204, 21), rgb(251, 191, 36))"
+        />
+        <StatCard
+          label="Qualified"
+          value={qualifiedCount}
+          subtitle="Good potential"
+          accent="linear-gradient(to right, rgb(16, 185, 129), rgb(52, 211, 153))"
+        />
+        <StatCard
+          label="Lost"
+          value={lostCount}
+          subtitle="Closed as lost"
+          accent="linear-gradient(to right, rgb(239, 68, 68), rgb(252, 165, 165))"
+        />
+      </div>
+
+      {/* Optional second row: conversion metric */}
+      <div className="mt-4">
+        <div className="inline-flex items-center gap-2 rounded-full bg-slate-900 text-slate-100 px-4 py-1.5 text-xs shadow-sm">
+          <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
+          <span className="font-medium">
+            Qualified conversion: {conversionRate}% of total leads
+          </span>
+        </div>
+      </div>
+    </section>
+  );
+};
 
 
 // --- Main Dashboard Implementation ---
@@ -222,8 +363,18 @@ export default function DashboardPage() {
   const router = useRouter();
   const [errorMsg, setErrorMsg] = useState(null);
   const [currentUserEmail, setCurrentUserEmail] = useState('');
+  const [currentUserId, setCurrentUserId] = useState('');
 
-  // --- Auth & Role Check Logic: USE BOTH CLAIMS + FIRESTORE ROLE ---
+  // NEW: dashboard stats state
+  const [stats, setStats] = useState({
+    totalLeads: 0,
+    newCount: 0,
+    contactedCount: 0,
+    qualifiedCount: 0,
+    lostCount: 0,
+  });
+
+  // --- Auth & Role Check Logic ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (!user) {
@@ -231,12 +382,12 @@ export default function DashboardPage() {
         return;
       }
 
+      setCurrentUserId(user.uid);
+
       try {
-        // 1) Get custom claims from ID token
         const tokenResult = await getIdTokenResult(user);
         const claimsRole = tokenResult.claims.role || null;
 
-        // 2) Get Firestore user doc for role + email
         let firestoreRole = null;
         try {
           const userDocSnap = await getDoc(doc(db, 'users', user.uid));
@@ -244,6 +395,13 @@ export default function DashboardPage() {
             const data = userDocSnap.data();
             firestoreRole = data.role || null;
             setCurrentUserEmail(data.email || user.email || '');
+
+            if (data.isActive === false) {
+              alert('Your account has been deactivated by the admin.');
+              await signOut(auth);
+              router.push('/login');
+              return;
+            }
           } else {
             setCurrentUserEmail(user.email || '');
           }
@@ -252,8 +410,8 @@ export default function DashboardPage() {
           setCurrentUserEmail(user.email || '');
         }
 
-        // 3) Decide effective role
-        const effectiveRole = claimsRole || firestoreRole || '';
+        const effectiveRoleRaw = claimsRole || firestoreRole || '';
+        const effectiveRole = effectiveRoleRaw.toLowerCase();
 
         console.log(
           '[Auth Debug] claimsRole =',
@@ -264,7 +422,7 @@ export default function DashboardPage() {
           effectiveRole,
         );
 
-        if (effectiveRole !== 'Admin') {
+        if (effectiveRole !== 'admin') {
           router.push('/unauthorized');
           return;
         }
@@ -279,21 +437,58 @@ export default function DashboardPage() {
     return () => unsubscribe();
   }, [router]);
 
-  // --- Data Fetching Logic ---
+  // --- Data Fetching Logic (users + teams + stats) ---
   const fetchData = useCallback(async () => {
     setLoading(true);
     setErrorMsg(null);
     try {
       const userSnap = await getDocs(collection(db, 'users'));
       const teamSnap = await getDocs(collection(db, 'teams'));
-      const fetchedUsers = userSnap.docs.map((d) => ({
-        uid: d.id,
-        ...d.data(),
-        email: d.data().email || 'N/A',
-        role: d.data().role || '',
-      }));
+
+      const fetchedUsers = userSnap.docs.map((d) => {
+        const data = d.data();
+        return {
+          uid: d.id,
+          email: data.email || 'N/A',
+          role: data.role || '',
+          isActive: data.isActive !== undefined ? data.isActive : true,
+        };
+      });
+
       setUsers(fetchedUsers);
-      setTeams(teamSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+      const teamDocs = teamSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setTeams(teamDocs);
+
+      // --- NEW: compute stats across all teams' leads ---
+      let totalLeads = 0;
+      let newCount = 0;
+      let contactedCount = 0;
+      let qualifiedCount = 0;
+      let lostCount = 0;
+
+      // loop through each team and fetch its leads
+      for (const teamDoc of teamSnap.docs) {
+        const teamId = teamDoc.id;
+        const leadsSnap = await getDocs(collection(db, 'teams', teamId, 'leads'));
+        totalLeads += leadsSnap.size;
+
+        leadsSnap.forEach((ld) => {
+          const data = ld.data();
+          const status = (data.status || '').toLowerCase();
+          if (status === 'new') newCount++;
+          else if (status === 'contacted') contactedCount++;
+          else if (status === 'qualified') qualifiedCount++;
+          else if (status === 'lost') lostCount++;
+        });
+      }
+
+      setStats({
+        totalLeads,
+        newCount,
+        contactedCount,
+        qualifiedCount,
+        lostCount,
+      });
     } catch (err) {
       console.error('Error fetching data:', err);
       setErrorMsg('Failed to fetch data. Check network and Firestore rules.');
@@ -306,7 +501,7 @@ export default function DashboardPage() {
     if (!roleLoading) fetchData();
   }, [roleLoading, fetchData]);
 
-  // --- Role Assignment Logic (using ID token + Authorization header) ---
+  // --- Role Assignment Logic (Cloud Function) ---
   const handleAssignRole = async (uid, role) => {
     setErrorMsg(null);
     if (!uid || !role) {
@@ -347,7 +542,6 @@ export default function DashboardPage() {
         return { success: false };
       }
 
-      // Update local state so UI reflects new role
       setUsers((prev) =>
         prev.map((u) => (u.uid === uid ? { ...u, role } : u)),
       );
@@ -366,10 +560,32 @@ export default function DashboardPage() {
     }
   };
 
+  // --- Activate / Deactivate Logic ---
+  const handleToggleActive = async (uid, currentIsActive) => {
+    setErrorMsg(null);
+    if (!uid) return;
+
+    try {
+      const userRef = doc(db, 'users', uid);
+      await updateDoc(userRef, {
+        isActive: !currentIsActive,
+      });
+
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.uid === uid ? { ...u, isActive: !currentIsActive } : u
+        ),
+      );
+    } catch (err) {
+      console.error('Error toggling user active state:', err);
+      setErrorMsg('Failed to update user active status.');
+    }
+  };
+
   const getTabTitle = () => {
     switch (activeTab) {
       case 'users':
-        return '👥 User Role Management';
+        return '👥 User Role & Access Management';
       case 'teams':
         return '🏗️ Team Structure Configuration';
       case 'leads-create':
@@ -453,7 +669,6 @@ export default function DashboardPage() {
             activeTab={activeTab}
             setActiveTab={setActiveTab}
           />
-        
         </nav>
 
         <button
@@ -565,10 +780,15 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="space-y-8">
+              {/* NEW: Stats cards at top */}
+              <StatsOverview stats={stats} />
+
               {activeTab === 'users' && (
                 <UserManagementTab
                   users={users}
                   handleAssignRole={handleAssignRole}
+                  handleToggleActive={handleToggleActive}
+                  currentUserId={currentUserId}
                   loading={loading}
                 />
               )}
