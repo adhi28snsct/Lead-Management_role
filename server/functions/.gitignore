@@ -21,7 +21,7 @@ pnpm-debug.log*
 
 # Firebase cache & emulator data
 .firebase/
-.firebaserc
+
 firebase-debug.log
 
 # Mac / OS files
